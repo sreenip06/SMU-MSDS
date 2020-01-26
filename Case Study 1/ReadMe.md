@@ -1,14 +1,14 @@
-###Introduction
+### Introduction
 
 This project covers the details of exploratory analysis on US Craft Beers and Breweries data sets provided to us. We did the required analysis on the data sets to answer key questions as well as gather interesting findings based on the data.
 
-###Input Data Sets
+### Input Data Sets
 
 i. Beers.csv - Contains data on 2000+ craft canned beers brewed in the US
 ii. Breweries.csv - Contains data for 500+ breweries in the US
 iii. StatePopArea.csv - Contains the population (as of 2019) and area (in square miles) for the 50 US states and District of Columbia
 
-###Key Analysis Questions
+### Key Analysis Questions
 
 The analysis addresses the following key questions:
 
@@ -22,7 +22,7 @@ The analysis addresses the following key questions:
 
 In addition, we also conduct a brewery adequacy analysis assessing the number of breweries in a State relative to its population and area.
 
-###Conclusions
+### Conclusions
 
 - In general, the breweries are distributed throughout the US relative to the State's population, with a few exceptions
 - IBU measure is missing for more than 40% of the observations in the input data set; availability of quality data is key to make effecitve inferences from the analysis
