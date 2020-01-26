@@ -1,0 +1,388 @@
+---
+title: "US Craft Beers and Breweries - EDA"
+author: "Peter Phan & Sreeni Prabhala"
+date: "1/12/2020"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Introduction
+
+This project covers the details of exploratory analysis on US Craft Beers and Breweries data sets as requested by the Budweiser executive team. Our team did the required analysis on the data sets provided, and have consolidated answers for key questions, as well as interesting findings, in this project.
+
+```{r pressure, echo=FALSE, warning=FALSE, message=FALSE}
+library(dplyr)
+library(caret)
+library(ggplot2)
+library(tidyverse)
+library(openintro)
+library(doBy)      # for summaryBy
+library(class)     # for KNN
+library(naniar)    # for NA chart
+library(usmap)     # for US map
+library(ggrepel)   # for US map
+library(sf)        # for US map
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(packHV)    # for histogram + box plot
+library(cowplot)   # for aligining the plots
+library(GGally)    # for ggpairs
+library(plotly)    # for ggplotly
+library(ggthemes)
+library(dataMaid)
+```
+
+##Preparation
+
+Import the beers and breweries data sets, remove any duplicates, and take a glimpse at them to make sure they are read successfully.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Read beers data
+beers <- read.csv ("C:/Users/home/Documents/Sreeni/SMU/DDS/CaseStudy1/Beers.csv", header = TRUE, strip.white=TRUE, na.strings=c("", " ", "NA"))
+# Remove Duplicates
+beers <- distinct(beers, Name, ABV, IBU, Brewery_id, Style, Ounces, .keep_all=TRUE)
+# makeCodebook(beers)
+glimpse(beers)
+
+# Read breweries data
+breweries <- read.csv ("C:/Users/home/Documents/Sreeni/SMU/DDS/CaseStudy1/Breweries.csv", header= TRUE, strip.white = TRUE, na.strings=c("", " ", "NA"))
+glimpse(breweries)
+```
+
+##Q1 : Where are the craft beer breweries located? 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# How many breweries are present in each state? Count by States, Desc
+brewerysState = breweries%>% count(State,sort=TRUE)
+
+#Add human readable names to the brewerysState dataframe
+names(brewerysState) = c("state", "count")
+
+# draw the counts on a usmap
+p <- plot_usmap(data=brewerysState, values = "count", color = "white", labels=FALSE)
+# Display counts on the map; so summarize & plot data to get avg x and y coordinates by state to display the count there
+txtval <- summaryBy(data=p$data, x+y+count ~ state, FUN=mean, keep.names=T)
+
+# we need to nudge the counts for MI, HI, FL, and AK a bit so they appear within the state boundaries
+txtval$x <- ifelse(txtval$state == "MI", txtval$x+100000, txtval$x)
+txtval$y <- ifelse(txtval$state == "MI", txtval$y-100000, txtval$y)
+txtval$x <- ifelse(txtval$state == "HI", txtval$x+155000, txtval$x)
+txtval$y <- ifelse(txtval$state == "HI", txtval$y-120000, txtval$y)
+txtval$x <- ifelse(txtval$state == "FL", txtval$x+90000, txtval$x)
+txtval$y <- ifelse(txtval$state == "AK", txtval$y+150000, txtval$y)
+p + geom_text(data=txtval, aes(x=x, y=y, label=count), col="lightgrey", cex=2.5) +
+  scale_fill_continuous(low = "darkolivegreen4", high = "darkgreen", guide="colorbar") +
+  theme_bw()  + labs(fill = "Brewery Count",title = "Breweries by State", x="", y="") +
+  scale_y_continuous(breaks=c()) + scale_x_continuous(breaks=c()) + theme(panel.border = element_blank()) +
+  theme(plot.title=element_text(hjust=0.5))
+```
+
+Most of the breweries are on the west coast, in Texas, and in more populous states on the east coast. The number of breweries in general seem to relate to the population of the state. A couple of interesting exceptions however - CO with 47 breweries and MI with 32 breweries seem to have more number of breweries than their population warrants. 
+
+##Q2 : Merge beer data with the breweries data. Print the first 6 and last 6 observations.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+#Merging the beer and breweries data into one DF
+BeersBreweriesDF = merge(x=beers,y=breweries,by.x="Brewery_id",by.y="Brew_ID")
+#Tidy columns Name
+names(BeersBreweriesDF) = c("Brewery_Id","Beer_Name","Beer_Id","ABV","IBU","Beer_Style","Beer_OZ","Brewery_Name","Brewery_City","Brewery_State")
+#Display the first 6 and last 6 entries
+print(head(BeersBreweriesDF,6))
+print(tail(BeersBreweriesDF,6))
+```
+
+##Q3 : What's the quality of data we have?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# plot number of NAs using gg_miss_var
+#pmiss1 <- gg_miss_var(BeersBreweriesDF)
+#pmiss1
+# plot number of NAs using gg_miss_var
+pmiss1 <- gg_miss_upset(BeersBreweriesDF, nsets=n_var_miss(BeersBreweriesDF))  
+pmiss1
+```
+
+IBU value is missing in 42% of the observations. Few observations are missing values for ABV and/or Beer Style as well; however, they are not too concerning for our analyses. Let us look at the % missing of IBU values by State to see if the problem is limited to a few states.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# let's look at missing IBUs by State so we can assess if they are
+# isolated to a few states or are missing across the board
+# gather summary numbers by State and plot missing values for IBU and ABV by State
+stagg <- aggregate(cbind(ABV, IBU)~Brewery_State, data=BeersBreweriesDF, FUN=function(x) c(mn=mean(x, na.rm=TRUE), md=median(x, na.rm=TRUE), max=ifelse(is.infinite(max(x, na.rm=TRUE)), NA, max(x, na.rm=TRUE)), cna=sum(is.na(x)), cnt=length(x), pna=(sum(is.na(x))/length(x))*100), na.action=na.pass)
+# unnest dataframes to convert aggregates into different columns
+unnest_dataframes <- function(x)
+{
+  y <- do.call(data.frame, x)
+  if("data.frame" %in% sapply(y, class)) unnest_dataframes(y)
+  y
+}
+stagg <- unnest_dataframes(stagg)
+# set column names
+colnames(stagg) <- c("State", "MeanABV", "MedianABV", "MaxABV", "CntNAABV", "CntABV", "PctNAABV", "MeanIBU", "MedianIBU", "MaxIBU", "CntNAIBU", "CntIBU", "PctNAIBU")
+# scale IBU values
+# stagg$MaxIBU <- stagg$MaxIBU / 800
+# draw % missing values by State for IBU and ABV
+# subset the data we need and pivot it
+napct <- stagg[, c("State", "PctNAABV", "PctNAIBU")]
+colnames(napct) <- c("State", "ABV", "IBU")
+pmiss2 <- ggplot(data=gather(napct, "Measure", "Value", -State),
+                 aes(x=State, y=Value, color=Measure, fill=Measure)) +
+  geom_bar(position="dodge", stat="summary", fun.y="mean", width=0.8) +
+  theme(axis.text.x=element_text(angle=90, hjust=0.5, vjust=0.4, size=8)) +
+  labs(x="State", y="% Missing Values", title="Missing ABV and IBU Values by State") +
+  theme(plot.title=element_text(hjust=0.5))
+pmiss2
+```
+
+IBU values are missing across states; there are quite a few states or which more than 50% observations are missing IBU measure. SD is missing IBU measure for all observations. We will ignore observations with missing values for further analysis as applicable.
+
+##Q4 : What are the median beer measures by State?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# get the medians of ABV and IBU by state; remove nulls
+measMedians <- stagg[,c("State", "MedianABV", "MedianIBU")]
+colnames(measMedians) <- c("State", "ABV", "IBU")
+```
+
+Let us look at summary of median measures to assess how we need to scale measures to depict them on same plot
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary(measMedians)
+# add a column to divide IBU by 800 so as to plot on same graph
+measMedians$IBUOrig <- measMedians$IBU
+measMedians$IBU <- measMedians$IBUOrig / 800
+StateMedians <- gather(measMedians[,1:3], "Measure", "Value", -State)
+# get the na percents to grade fill bars
+measPcts <- stagg[,c("State", "PctNAABV", "PctNAIBU")]
+colnames(measPcts) <- c("State", "ABV", "IBU")
+StatePcts <- gather(measPcts, "Measure", "ValuePct", -State)
+# merge data sets
+StateMedians <- merge(StateMedians, StatePcts, by=c("State", "Measure"))
+StateMedians$ValuePct <- (100 - StateMedians$ValuePct) / 100
+StateMedians[is.na(StateMedians)] <- 0
+# create a plot with the median values by state;
+# add secondary axis for IBU values
+# format text sizes for better visual
+pmedian <- ggplot(data=StateMedians, aes(x=State, y=Value, fill=Measure, alpha=ValuePct)) +
+  geom_bar(position="dodge", stat="summary", fun.y="mean", width=0.8) +
+  labs(x="State", y="ABV", title="Median ABV and IBU by State") +
+  scale_y_continuous(sec.axis = sec_axis(~.*800, name = "IBU")) +
+  theme(axis.text.x=element_text(angle=90, hjust=0.5, vjust=0.4, size=8)) +
+  theme(legend.text=element_text(size=8), legend.title=element_text(size=8)) +
+  theme(axis.title.x=element_text(size=8), axis.title.y=element_text(size=8)) +
+  theme(axis.text.y=element_text(size=8)) +
+  theme(legend.position="bottom", legend.key.size=unit(0.5, "line")) +
+  scale_shape_manual(values = 0:length(unique(StateMedians$State))) +
+  theme(plot.title=element_text(hjust=0.5)) +
+  guides(alpha=guide_legend(title="% Available Values"))
+# print it for now; we will add most alcoholic and bitter annotates later
+pmedian
+
+```
+
+The variance of median IBU values across is more compared to the variance for median ABV values. The strength of the bar color represents our confidence in the median value reported for the state, given the missing values for measures. E.g. even though ME is depicted as having the highest median IBU value, we are not very confident on that measure as less than 25% of the ME observations have IBU value reported.
+
+##Q5 : Which are our most strong and most bitter beers?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# get the state with max ABV, beer name and ABV value
+maxABVInd <- which.max(BeersBreweriesDF[,"ABV"])
+maxABVBeer <- BeersBreweriesDF[maxABVInd, c("Brewery_State", "Beer_Name", "ABV")]
+maxIBUInd <- which.max(BeersBreweriesDF[,"IBU"])
+maxIBUBeer <- BeersBreweriesDF[maxIBUInd, c("Brewery_State", "Beer_Name", "IBU")]
+# construct annotate texts
+maxABVtxt <- str_c("  Most Alcoholic Beer\n  State: ", maxABVBeer$Brewery_State, "\n  Beer: ", maxABVBeer$Beer_Name, "\n  ABV: ",maxABVBeer$ABV)
+maxIBUtxt <- str_c("  Most Bitter Beer\n  State: ", maxIBUBeer$Brewery_State, "\n  Beer: ", maxIBUBeer$Beer_Name, "\n  IBU: ",maxIBUBeer$IBU)
+# now print them on the bar chart as annotates
+pmaxABV <- ggplot(data=stagg, aes(x=State, y=MaxABV)) +
+  geom_point(size=2, na.rm=TRUE, alpha = ifelse(stagg$State == maxABVBeer$Brewery_State, 1, 0.3), color="#F8766D") +
+  geom_segment(aes(x=State,xend=State,y=0,yend=MaxABV),alpha=ifelse(stagg$State==maxABVBeer$Brewery_State,1,0.3),color="#F8766D") +
+  labs(x="", y="Highest ABV", title="Highest ABV and IBU by State") +
+  theme(axis.title.y=element_text(size=9)) +
+  theme(axis.text.x=element_text(angle=90, hjust=0.5, vjust=0.4, size=8)) +
+  theme(plot.title=element_text(hjust=0.5)) +
+  annotate("text", x=maxABVBeer$Brewery_State, y=maxABVBeer$ABV -0.015, label=maxABVtxt, size=3, hjust=0, lineheight=0.8)
+# pmaxABV
+pmaxIBU <- ggplot(data=stagg, aes(x=State, y=MaxIBU)) +
+  geom_point(size=2, na.rm=TRUE, alpha = ifelse(stagg$State == maxIBUBeer$Brewery_State, 1, 0.3), color="#00BFC4") +
+  geom_segment(aes(x=State,xend=State,y=0,yend=MaxIBU),na.rm=TRUE,alpha=ifelse(stagg$State==maxIBUBeer$Brewery_State,1,0.3),color="#00BFC4") +
+  labs(x="State", y="Highest IBU") +
+  theme(axis.title.x=element_text(size=8), axis.title.y=element_text(size=8)) +
+  theme(axis.text.x=element_text(angle=90, hjust=0.5, vjust=0.4, size=8)) +
+  annotate("text", x=maxIBUBeer$Brewery_State, y=maxIBUBeer$IBU -18, label=maxIBUtxt, size=3, hjust=0, lineheight=0.8)
+# pmaxIBU
+plot_grid(pmaxABV, pmaxIBU, ncol=1, rel_heights=c(1.2, 1), align='v', axis='lr')
+```
+
+The highest ABV values for CO, IN, and KY seem to be outliers; they are significantly higher compared to the general range of highest ABV value for rest of the state (which are in he range 7.5% to 10%).
+
+Again, variance of highest IBU values across states is more compared to the variance for highest ABV values, which is same as what we have found with median values.
+
+##Q6 : What is the distribution of ABV of our beers?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# hist_boxplot(BeersBreweriesDF$ABV)
+pabvhist <- ggplot(BeersBreweriesDF, aes(x=ABV)) +
+  geom_histogram(fill="#00BFC4", color="black", stat="count", na.rm=TRUE,freq=FALSE, density=TRUE) +
+  theme_classic() + xlab("")
+pabvboxp <- ggplot(BeersBreweriesDF, aes(y=ABV)) +
+  geom_boxplot(fill="#00BFC4", na.rm=TRUE) + coord_flip() + theme_classic() +
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())
+plot_grid(pabvhist, pabvboxp, ncol=1, rel_heights=c(4, 1), align='v', axis='lr')
+```
+
+As discussed in the max. ABV plot, the box plot depicts the 3 outlier values CO, IN, and KY towards the right. Most of the beers have ABV value between 4% to 7% range. Given the outliers, median is still a good center measure to assess the distribution of ABV measure.
+
+## Q7 : Is there a correlation between ABV and IBU?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+p71 <-
+ggplot(BeersBreweriesDF, aes(x=ABV, y=IBU))+
+  geom_point(shape= BeersBreweriesDF$Beer_OZ, alpha=(3/5), color="brown", na.rm=TRUE) +
+  theme() +
+  ggtitle("Beer's ABV vs. IBU") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold")) +
+  geom_smooth(method="gam", na.rm=TRUE)
+
+# density plot
+p72 <- ggplot(BeersBreweriesDF, aes(x=ABV, y=IBU), na.rm=TRUE) +
+  stat_density2d(aes(fill = stat(level)), geom="polygon", na.rm=TRUE) +
+  labs(y = "Bitterness (IBU)",
+       x = "Alcohol Volume (ABV)",
+       title = "Density by ABV and IBU") +
+  theme(plot.title = element_text(hjust = 0.5, face="bold")) +
+  theme(legend.position="bottom")
+
+plot_grid(p71, p72, nrow=1, rel_heights=c(1, 1,2), align='h', axis='lr')
+```
+
+The scatterplot does depict a moderate positive correlation between ABV and IBU values - a beer with high ABV value is likely to have higher IBU value as well. However, we cannot establish causation - higher ABV value doesn't cause higher IBU value.
+
+##Q8 : Can we classify IPA and Other Ale beers using a KNN model based on ABV and IBU?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# add a column for Ale Category - IPA or Other
+# when looking for Ale and IPA, look for match on word so that we don't pick a match in pale for ale
+BeersBreweriesDF$Ale_Category <- ifelse(grepl("India Pale Ale",
+  BeersBreweriesDF$Beer_Style, ignore.case=TRUE), "IPA", ifelse(grepl("\\bIPA\\b",
+  BeersBreweriesDF$Beer_Style, ignore.case=TRUE), "IPA", ifelse(grepl("\\bAle\\b",
+  BeersBreweriesDF$Beer_Style, ignore.case=TRUE), "Other", NA)))
+
+# Create a subset for KNN model, with non-NA values for IBU, ABV, and Ale Category
+subsetBeers <- BeersBreweriesDF[!is.na(BeersBreweriesDF$ABV) & !is.na(BeersBreweriesDF$IBU) & !is.na(BeersBreweriesDF$Ale_Category), c("ABV", "IBU", "Ale_Category")]
+```
+
+Look at summary of the data subset to assess variables and see if we need to normalize them to scale.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+summary(subsetBeers) # 924 obs
+# ABV and IBU are on different scales; normalize them
+# create a simple normalize function
+nor <- function(x) { (x-min(x)) / (max(x)-min(x))}
+subsetBeers$normABV <- nor(subsetBeers$ABV)
+subsetBeers$normIBU <- nor(subsetBeers$IBU)
+#summary(subsetBeers) # 924 obs
+```
+
+Using the normalized variables, run KNN model for different values of k in 100 iterations with random train and test splits, and compute the mean accuracy. Calculate hyper parameter k value for highest accuracy.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# Run KNN classification in a few iterations to figure out best k value based on accuracy
+# nk <- as.integer(readline(prompt="Enter # of k's: ")) # number of k's
+# ni <- as.integer(readline(prompt="Enter # of iterations: "))  # number of iterations
+nk <- 100
+ni <- 100
+statDF <- list()
+
+# statDFcv <- list()
+#pb <- txtProgressBar(min=0, max=100, style=3) # progress bar for iterations loop
+for (i in 1:ni)
+{
+  #setTxtProgressBar(pb, i)
+  trainIndices <- sample(1:length(subsetBeers$Ale_Category), round(0.70*length(subsetBeers$Ale_Category)))
+  trainBeers <- subsetBeers[trainIndices,]
+  testBeers <- subsetBeers[-trainIndices,]
+  for (j in 1:nk)
+  {
+    classifications <- knn(trainBeers[,4:5], testBeers[,4:5], trainBeers$Ale_Category, prob=TRUE, k=j)
+    confmat <- confusionMatrix(table(classifications, testBeers$Ale_Category))
+    
+    # store k, iteration, accuracy, sensitivity, and specificity into a list
+    statDF <- rbind(statDF, list(j, i, confmat$overall[1], confmat$byClass[1], confmat$byClass[2]))
+    
+    # run one-out cv as well
+    # confmatcv <- confusionMatrix(table(subsetBeers[,3],knn.cv(subsetBeers[,4:5], subsetBeers[,3], k=j)))
+    # statDFcv <- rbind(statDFcv, list(j, i, confmatcv$overall[1], confmatcv$byClass[1], confmatcv$byClass[2]))
+  }
+}
+statDF <- as.data.frame(statDF)
+colnames(statDF) <- c("k", "iteration", "accuracy", "sensitivity", "specificity")
+statDF$k <- as.integer(statDF$k)
+statDF$accuracy <- as.numeric(statDF$accuracy)
+statDF$sensitivity <- as.numeric(statDF$sensitivity)
+statDF$specificity <- as.numeric(statDF$specificity)
+#statDFcv <- as.data.frame(statDFcv)
+#colnames(statDFcv) <- c("k", "iteration", "accuracy", "sensitivity", "specificity")
+# plot mean accuracy for both methods
+meanstatDF <- summaryBy(data=statDF, accuracy + sensitivity + specificity ~ k, FUN=mean, keep.names=T)
+p2 <- ggplot(data=meanstatDF, aes(x=k, y=accuracy)) + geom_line()
+xbest <- which.max(meanstatDF[,2]) # x-value for best accuracy
+ybest <- max(meanstatDF[,2])
+maxtext <- str_c("Best k = ",xbest, "; Accuracy = ", round(ybest,2), "; Sensitivity = ", round(meanstatDF[xbest,3], 2), "; Specificity = ", round(meanstatDF[xbest,4], 2))
+p2 + annotate("text", x = xbest, y = ybest + 0.001, label=maxtext, size=3) +
+  annotate("point", x=xbest, y=ybest, color="red") + theme_bw() +
+  labs(title = "kNN Classification for Beer Style by ABV and IBU", x="k", y="Mean Accuracy") +
+  theme(plot.title=element_text(hjust=0.5)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+#ggplotly(p2)
+```
+
+Using the KNN model based on ABV and IBU, we are getting greater than 85% accuracy in most cases. Our Sensitivity and Specificity statistics are are looking good. As such, this is a good model to classify beers into IPA and Other Ale categories.
+
+##QA : Which states produce stronger beers on the average?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# plot average ABV value by State on a US Map
+babv <- summaryBy(data=BeersBreweriesDF[!is.na(BeersBreweriesDF$ABV),], ABV ~ Brewery_State, FUN=mean, keep.names=T)
+colnames(babv) <- c("state", "ABV")
+p <- plot_usmap(data=babv, values = "ABV", color = "white", labels=FALSE)
+p +scale_fill_continuous(low = "darkgoldenrod2", high = "darkorange4", guide="colorbar") +
+  theme_bw()  + labs(fill = "Mean ABV",title = "Mean ABV by State", x="", y="") +
+  scale_y_continuous(breaks=c()) + scale_x_continuous(breaks=c()) + theme(panel.border = element_blank())
+```
+
+##QB : Are our breweries efficiently located across the US based on population and area? Are there opportunities to balance the consumption and production across states?
+
+We will compare the percentage of breweries across states using a weighted percentage based on state's population (based on 2019 census) and area (80:20 weightage). 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# import US State population and area statistics for 
+# brewery adequacy analysis
+stPopArea <- read.csv ("C:/Users/home/Documents/Sreeni/SMU/DDS/CaseStudy1/StatePopArea.csv", header = TRUE, strip.white=TRUE, na.strings=c("", " ", "NA"))
+# add a column for weighted precent with 75% for population
+# and 25% for area
+stPopArea$weightedPct <- (0.75 * stPopArea$pctPopulation) + (0.25 * stPopArea$areaPct)
+# get percent of breweries by state to compare to the weighted percent
+brewerysState$CntPct <- brewerysState$count * 100/ sum(brewerysState$count)
+# merge percent breweries with pop-area percent
+stPAB <- merge(stPopArea, brewerysState[,c("state", "CntPct")], by="state")
+# calculate difference in percentages to assess adequacy
+stPAB$diffPct <- stPAB$weightedPct - stPAB$CntPct
+# now draw a graded plot in US map
+padequacy <- plot_usmap(data=stPAB, values = "diffPct", color = "white", labels=FALSE)
+padequacy +
+  scale_fill_continuous(low = "beige", high = "darkgoldenrod3", guide="colorbar") +
+  theme_bw()  + labs(fill = "",title = "Brewery Adequacy by State", x="", y="") +
+  scale_y_continuous(breaks=c()) + scale_x_continuous(breaks=c()) + theme(panel.border = element_blank()) +
+  theme(plot.title=element_text(hjust=0.5))
+
+```
+
+Based on the above, CA and TX, and to a lesser extent FL, NY, and NJ, may benefit from more number of breweries based on their population. CO seems to have way too many breweries for it's population - if the inventory levels are maintained well at these breweries, it may not be a cause for concern.
+
+The above analysis calls out AK as one of the states that can benefit from more breweries, but that inference is mostly based on AK's huge size, and can be discarded as such.
