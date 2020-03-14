@@ -1,0 +1,535 @@
+---
+title: "Case Study 2 - Employee Turnover Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+##Executive Summary
+
+###Background:
+
+- Frito-Lay is always about people; it is a place that seeks out different perspectives and celebrates diversity at every level of the organization
+- Frito-Lay has engaged DDSAnalytics to leverage data science and take the Talent Management to next level
+- Scope of services includes workforce planning, employee training, and reducing/preventing voluntary employee turnover
+
+###Objectives:
+
+1. Identify the top three factors that contribute to employee turnover
+2. Build a robust model to predict attrition
+3. Obtain job role specific insights that will help with employee retention, satisfaction, and professional development
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+library(naniar)    # for NA chart
+library(GGally)    # for ggpairs
+library(caret)     # for correlation
+library(dplyr)     # for case_when
+library(class)     # for KNN
+library(doBy)      # for summaryBy
+library(stringr)   # for str_c
+library(e1071)     # for naiveBayes
+```
+
+##Preparation
+
+First, we will import the dataset provided. There are some variables in the dataset that contain same value for all the observations - these variables will cause us issues when we try to calculate correlations. So we will remove these variables from the dataset. Then we will check if any of the variables contain missing values.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# import data file
+attrtn <- read.csv("C:\\Users\\home\\Documents\\Sreeni\\SMU\\DDS\\CaseStudy2\\CaseStudy2-data.csv", header=TRUE, strip.white=TRUE, na.strings=c("", " ", "NA"))
+# loop through variables to see if any of them have
+# same value for all observations;
+# we need to ignore these when we look at correlation
+removeAttrUniqVar <- function(x) {
+  varlist <- names(x)
+  uniqCnt <- unlist(lapply(varlist, function(y) {
+    ifelse(length(unique(attrtn[,y])) > 1, TRUE, FALSE)
+  }))
+  z <- x[,uniqCnt]
+  return(z)
+}
+attrtnS1 <- removeAttrUniqVar(attrtn)
+
+# now remove variables that have same value for all rows
+# check for NAs to see if we need to impute data
+gg_miss_var(attrtnS1)
+```
+
+All the variables contain values for all the observations. We will now continue with data exploration for variables selection.
+
+##Data Exploration
+
+We will do the following to identify the variables influencing attrition.
+
+1. Assess the correlation of various factor variables on attrition - we will do this by plotting percentage stacked bars for attrition for different values of factors to see if any specific values of the factor influence the attrition.
+2. Assess the correlation of various continuous variables on attrition - we will use overlayed histograms to assess if we can identify the data ranges of the variable that influence attrition.
+3. Obtain correlation coefficients for the relevant variables - we will run correlation test and use estimates to assess the correlation.
+4. Identify the set of variables that impact attrition - we will use the results from above 3 steps for this.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# create a function to plot graph for factor variables
+# to assess significance for attrition classification;
+# this function calculates attrition percent for each
+# value of factor variable and plots them in a bar chart
+getFactorPctPlot <- function(df, x1, x2) {
+  s1 <- df[,c(x1,x2)]
+  names(s1) <- c("Col1", "Col2")
+  s1 <- s1 %>% group_by(Col1, Col2) %>% count(Col1)
+  s1 <- do.call(data.frame, s1)
+  s1 <- s1 %>% group_by(Col2) %>% mutate(percent = n*100/sum(n))
+  s1 <- do.call(data.frame, s1)
+  y_lab <- str_c(names(df)[x1], " Percent") 
+  p <- ggplot(data=s1, aes(x=Col2, y=percent, fill=as.factor(Col1))) +
+    geom_bar(position = "fill",stat = "identity") +
+    labs(x=names(df)[x2], y=y_lab, fill = names(df)[x1]) +
+    labs(title = str_c(names(df)[x1], " by ", names(df)[x2])) +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 9))
+  return(p)
+}
+# get the list of variables in our data frame
+# names(attrtnS1)
+# define a vector for all factor variables
+factorList <- c(4, 6, 8, 9, 11, 12, 14, 15, 16, 17, 18, 22, 24, 25, 26, 28, 29)
+# par(mfrow=c(2,2))
+for (fac in factorList) {
+  p1 <- getFactorPctPlot(attrtnS1, 3, fac)
+  print(p1)
+}
+```
+
+Based on the above stacked bars, we infer that the following factors potentially influence the attrition: EnvironmentSatisfaction, JobInvolvement, JobLevel, JobRole, MaritalStatus, OverTime, StockOptionLevel, WorkLifeBalance
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# next for continuous variables, assess the histograms
+# spliit by attrition if we see abnomral attrition 
+# for certain range of values
+continousList <- c(2, 5, 7, 13, 19, 20, 21, 23, 27, 30, 31, 32, 33)
+for (con in continousList) {
+  df1 <- attrtnS1[,c(3,con)]
+  names(df1) <- c("Attrition", "Variable")
+  p1 <- ggplot(df1, aes(x=Variable, fill=Attrition)) +
+    geom_histogram(alpha=0.5, position="identity") +
+    labs(x=names(attrtnS1)[con], y="Count") +
+    stat_bin(bins=30)
+  print(p1)
+}
+```
+
+Based on the above histograms, we infer that the following variables potentially influence the attrition: Age (high attrition for less than 25), TotalWorkingYears (high attrition for less than 5), YearsAtCompany (high attrition for 0), YearsInCurrentRole (high attrition for 0), YearsWithCurrManager (high attrition for 0).
+
+Now, we will convert string factors into integer factors and look at the correlation coefficients.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# add numerical variables for factors so we can do correlation
+convertAttrFactToInt <- function(x) { 
+  y <- x
+  y$Attrition <- ifelse(y$Attrition == "Yes", 1, 0)
+  y$BusinessTravel <- case_when(y$BusinessTravel == "Non-Travel" ~ 0,
+    y$BusinessTravel == "Travel_Rarely" ~ 1,
+    y$BusinessTravel == "Travel_Frequently" ~ 2)
+  y$Department <- case_when(y$Department == "Human Resources" ~ 1,
+    y$Department == "Research & Development" ~ 2,
+    y$Department == "Sales" ~ 3)
+  y$EducationField <- case_when(y$EducationField == "Human Resources" ~ 1,
+    y$EducationField == "Life Sciences" ~ 2,
+    y$EducationField == "Marketing" ~ 3,
+    y$EducationField == "Medical" ~ 4,
+    y$EducationField == "Other" ~ 5,
+    y$EducationField == "Technical Degree" ~ 6)
+  y$Gender <- ifelse(y$Gender == "Male", 0, 1)
+  y$JobRole <- case_when(y$JobRole == "Healthcare Representative" ~ 1,
+    y$JobRole == "Human Resources" ~ 2,
+    y$JobRole == "Laboratory Technician" ~ 3,
+    y$JobRole == "Manager" ~ 4,
+    y$JobRole == "Manufacturing Director" ~ 5,
+    y$JobRole == "Research Director" ~ 6,
+    y$JobRole == "Research Scientist" ~ 7,
+    y$JobRole == "Sales Executive" ~ 8,
+    y$JobRole == "Sales Representative" ~ 9)
+  y$MaritalStatus <- case_when(y$MaritalStatus == "Divorced" ~ 1,
+    y$MaritalStatus == "Married" ~ 2,
+    y$MaritalStatus == "Single" ~ 3)
+  #attrtn$over18Ind <- ifelse(attrtn$Over18 == "Y", 1, 0)
+  y$OverTime <- ifelse(y$OverTime == "Yes", 1, 0)
+  
+  return(y)
+}
+
+attrtnS3 <- convertAttrFactToInt(attrtnS1)
+
+# check to make sure none of the values are missing
+# gg_miss_var(attrtnS3)
+# str(attrtnS3)
+# define a function to loop through the variables in the data set,
+# run correlation test against Attrition, and return estimate
+# and p-value in a data frame;
+getCorDF <- function(df, x) {
+  varlist <- names(df[,-x])
+  corDF <- data.frame()
+  for (var in varlist) {
+    corTest <- cor.test(df[,x], df[,var])
+    corDF <- rbind(corDF, cbind("Estimate" = corTest$estimate, "p-value" = corTest$p.value))
+  }
+  corDF <- data.frame(cbind("Attribute" = varlist, corDF))
+  corDF <- do.call(data.frame, corDF)
+  # let's sort by the correlation estimate
+  corDF <- arrange(corDF, desc(abs(Estimate)))
+  return(corDF)
+}
+# check variables with high correlation
+print(head(getCorDF(attrtnS3, 3), 15))
+```
+
+From the histograms, we have identified potential grouping of some of the variables that may result in higher correlation. Lets add a few derived group variables and re-look at the correlation coefficients.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# from the histograms, we have identified potential grouping of
+# some of the variables that may result in higher correlation.
+# lets add a few derived variables and look at the correlation
+attrtnS3$AgeGroup <- ifelse(attrtnS3$Age <= 25, 1, 2)
+attrtnS3$TotalWorkingYearsGroup <- ifelse(attrtnS3$TotalWorkingYears < 5, 1, 2)
+attrtnS3$YearsInCurrentRoleGroup <- ifelse(attrtnS3$YearsInCurrentRole == 0, 1, 2)
+attrtnS3$YearsAtCompanyGroup <- ifelse(attrtnS3$YearsAtCompany == 0, 1, 2)
+attrtnS3$YearsWithCurrManagerGroup <- ifelse(attrtnS3$YearsWithCurrManager == 0, 1, 2)
+# check correlations again
+print(head(getCorDF(attrtnS3, 3), 15))
+```
+
+Now, let's use GGPairs to assess collinearity of some of these top variables.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# let's look at ggpairs to see if any of the top variables have
+# high collinearity
+ggpairs(attrtnS3, columns=c("OverTime", "TotalWorkingYears", "YearsWithCurrManager", "MaritalStatus", "JobInvolvement", "YearsInCurrentRole", "JobLevel", "MonthlyIncome"))
+```
+
+From the above plot, we can infer that the following variables have high correlation. It is enough if we include one of these variables in the model.
+
+- JobLevel, TotalWorkingYears, MonthlyIncome
+- YearsWithCurrManager, YearsInCurrentRole
+
+Next up, we will assess the models based on specific sets of the top variables.
+
+##Classification Model for Attrition
+
+First, we will assess a few kNN models using hyperparameter tuning, and look at the mean accuracy, sensitivity, and specificity metrics to compare them.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# KNN
+getAttrKnnModelPlot <- function(df, classifierCol, varCols) {
+  # create subset of data based on variables we are interested in
+  # modSubset <- attrtnS3[,c("Attrition", "OverTime", "TotalWorkingYearsGroup", "MaritalStatus")]
+  modSubset <- df[,c(classifierCol, varCols)]
+  # Run KNN classification in a few iterations to figure out best k value based on accuracy
+  nk <- 50
+  ni <- 50
+  statDF <- list()
+
+  for (i in 1:ni)
+  {
+    #setTxtProgressBar(pb, i)
+    trainIndices <- sample(1:length(modSubset[,1]), round(0.70*length(modSubset[,1])))
+    trainSet <- modSubset[trainIndices,]
+    testSet <- modSubset[-trainIndices,]
+    for (j in 1:nk)
+    {
+      classifications <- knn(trainSet[,-1], testSet[,-1], trainSet[,1], prob=TRUE, k=j)
+      confmat <- confusionMatrix(table(classifications, testSet$Attrition))
+    
+      # store k, iteration, accuracy, sensitivity, and specificity into a list
+      statDF <- rbind(statDF, list(j, i, confmat$overall[1], confmat$byClass[1], confmat$byClass[2]))
+    }
+  }
+  statDF <- as.data.frame(statDF)
+  colnames(statDF) <- c("k", "Iteration", "Accuracy", "Sensitivity", "Specificity")
+  statDF$k <- as.integer(statDF$k)
+  statDF$Accuracy <- as.numeric(statDF$Accuracy)
+  statDF$Sensitivity <- as.numeric(statDF$Sensitivity)
+  statDF$Specificity <- as.numeric(statDF$Specificity)
+  #statDFcv <- as.data.frame(statDFcv)
+  #colnames(statDFcv) <- c("k", "iteration", "accuracy", "sensitivity", "specificity")
+  # plot mean accuracy for both methods
+  meanstatDF <- summaryBy(data=statDF, Accuracy + Sensitivity + Specificity ~ k, FUN=mean, keep.names=T)
+  #p2 <- ggplot(data=meanstatDF, aes(x=k, y=Accuracy)) + geom_line()
+  xbest <- which.max(meanstatDF[,2]) # x-value for best accuracy
+  #ybest <- max(meanstatDF[,2])
+  #maxtext <- str_c("Best k = ",xbest, "; Accuracy = ", round(ybest,2), "; Sensitivity = ", round(meanstatDF[xbest,3], 2), "; Specificity = ", round(meanstatDF[xbest,4], 2))
+  #p2 <- p2 + annotate("text", x = xbest, y = ybest + 0.001, label=maxtext, size=3) +
+  #  annotate("point", x=xbest, y=ybest, color="red") + theme_bw() +
+  #  labs(title = "kNN Classification for Attrition", x="k", y="Mean Accuracy") +
+  #  theme(plot.title=element_text(hjust=0.5)) +
+  #  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+  #newlist <- list(plot = p2, meanstatDF = meanstatDF, bestStats = meanstatDF[xbest,])
+  newlist <- list(meanstatDF = meanstatDF, bestStats = meanstatDF[xbest,])
+  return(newlist)
+}
+```
+
+kNN Model 1 - "OverTime", "TotalWorkingYearsGroup", "MaritalStatus"
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+m1 <- getAttrKnnModelPlot(attrtnS3, "Attrition", c("OverTime", "TotalWorkingYearsGroup", "MaritalStatus"))
+m1$bestStats
+```
+
+kNN Model 2 - "OverTime", "JobInvolvement", "MaritalStatus"
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+m2 <- getAttrKnnModelPlot(attrtnS3, "Attrition", c("OverTime", "JobInvolvement", "MaritalStatus"))
+m2$bestStats
+```
+
+kNN Model 3 - "OverTime", "TotalWorkingYears", "MaritalStatus"
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+m3 <- getAttrKnnModelPlot(attrtnS3, "Attrition", c("OverTime", "TotalWorkingYears", "MaritalStatus")) # good
+m3$bestStats
+```
+
+kNN Model 4 - "OverTime", "YearsWithCurrManagerGroup", "MaritalStatus"
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+m4 <- getAttrKnnModelPlot(attrtnS3, "Attrition", c("OverTime", "YearsWithCurrManagerGroup", "MaritalStatus"))
+m4$bestStats
+```
+
+kNN Model 5 - "OverTime", "YearsWithCurrManager", "MaritalStatus"
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+m5 <- getAttrKnnModelPlot(attrtnS3, "Attrition", c("OverTime", "YearsWithCurrManager", "MaritalStatus"))
+m5$bestStats
+
+# Naive Bayes
+```
+
+The kNN models give us good accuracy and sensitivity metrics. However, these models are failing to meet the criteria of at least 60% of specificity requirement. Let us explore Naive Bayes models now.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+
+getAttrNBModelPlot <- function(df, classifierCol, varCols) {
+  # create subset of data based on variables we are interested in
+  # modSubset <- attrtnS3[,c("Attrition", "OverTime", "TotalWorkingYearsGroup", "MaritalStatus")]
+  modSubset <- df[,c(classifierCol, varCols)]
+  statDF <- list() # list for CM outputs; we will cast it to data frame later
+  for (nseed in 1:100)
+  {
+    set.seed(nseed)
+    # split train and test data sets
+    trainIndices <- sample(seq(1:length(modSubset[,1])),round(.7*length(modSubset[,1])))
+    trainSet <- modSubset[trainIndices,]
+    testSet <- modSubset[-trainIndices,]
+    # train the NB model
+    nbmodel <- naiveBayes(trainSet[,-1], factor(trainSet[,1], labels = c(0, 1)))
+    # obtain test predictions
+    testPredict <- predict(nbmodel, testSet[,-1])
+    # create confusion matrix for NB
+    cmAttrNB <- confusionMatrix(table(factor(testSet[,1], labels = c(0, 1)), testPredict))
+    # load accuracy details into a data frame
+    statDF <- rbind(statDF, list(nseed, cmAttrNB$overall[1], cmAttrNB$byClass[1], cmAttrNB$byClass[2]))
+  }
+  statDF <- as.data.frame(statDF)
+  colnames(statDF) <- c("Seed", "Accuracy", "Sensitivity", "Specificity")
+  statDF$Seed <- as.integer(statDF$Seed)
+  statDF$Accuracy <- as.numeric(statDF$Accuracy)
+  statDF$Sensitivity <- as.numeric(statDF$Sensitivity)
+  statDF$Specificity <- as.numeric(statDF$Specificity)
+  statDF <- do.call(data.frame, statDF)
+  return(list(statDF = statDF, meanstatDF = colMeans(statDF)))
+}
+```
+
+Naive Bayes Model 1 - "OverTime", "TotalWorkingYearsGroup", "MaritalStatus"
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+mnb1 <- getAttrNBModelPlot(attrtnS3, "Attrition", c("OverTime", "TotalWorkingYearsGroup", "MaritalStatus"))
+mnb1$meanstatDF
+```
+
+Naive Bayes Model 2 - "OverTime", "JobInvolvement", "MaritalStatus"
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+mnb2 <- getAttrNBModelPlot(attrtnS3, "Attrition", c("OverTime", "JobInvolvement", "MaritalStatus"))
+mnb2$meanstatDF
+```
+
+Naive Bayes Model 3 - "OverTime", "TotalWorkingYears", "MaritalStatus"
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+mnb3 <- getAttrNBModelPlot(attrtnS3, "Attrition", c("OverTime", "TotalWorkingYears", "MaritalStatus")) # good
+mnb3$meanstatDF
+```
+
+Naive Bayes Model 4 - "OverTime", "YearsWithCurrManagerGroup", "MaritalStatus"
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+mnb4 <- getAttrNBModelPlot(attrtnS3, "Attrition", c("OverTime", "YearsWithCurrManagerGroup", "MaritalStatus"))
+mnb4$meanstatDF
+```
+
+Naive Bayes Model 5 - "OverTime", "YearsWithCurrManager", "MaritalStatus"
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+mnb5 <- getAttrNBModelPlot(attrtnS3, "Attrition", c("OverTime", "YearsWithCurrManager", "MaritalStatus"))
+mnb5$meanstatDF
+```
+
+Based on the above comparisions, the Naive Bayes model with OverTime, TotalWorkingYears, and MaritalStatus gives us a robust model for predicting Attrition that meets our criteria of at least 60% of sensitivity and specificity. We will proceed with this model, obtain predictions for the validation dataset, and export the predictions in required format.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# get the model
+attrtnNBModel <- naiveBayes(attrtnS3[,c("OverTime", "TotalWorkingYears", "MaritalStatus")], factor(attrtnS3[,"Attrition"], labels = c(0, 1)))
+
+# predict classification for validation data set
+attrtnValidn <- read.csv("C:\\Users\\home\\Documents\\Sreeni\\SMU\\DDS\\CaseStudy2\\CaseStudy2CompSet No Attrition.csv", header=TRUE, strip.white=TRUE, na.strings=c("", " ", "NA"))
+# add Attrition placeholder
+attrtnValidn$Attrition <- ""
+
+# convert factors to integers in test set
+attrtnValidn <- convertAttrFactToInt(attrtnValidn)
+attrtnValidnPredict <- predict(attrtnNBModel, attrtnValidn[,c("OverTime", "TotalWorkingYears", "MaritalStatus")])
+# add preditions to the test set
+attrtnValidn$Attrition <- attrtnValidnPredict
+# turn Attrition back to Yes / No
+attrtnValidn$Attrition <- ifelse(attrtnValidn$Attrition == 1, "Yes", "No")
+# export to csv
+write.csv(select(attrtnValidn, c("ID", "Attrition")), "C:\\Users\\home\\Documents\\Sreeni\\SMU\\DDS\\CaseStudy2\\Case2PredictionsPrabhala Attrition.csv", row.names = FALSE)
+```
+
+##Regression Model for Income
+
+We will now work a regression model to calculate the Monthly Income. For this, first, let us look at the correlation coefficients for MonthlyIncome variable.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# get correlations for Income; index is 19
+print(head(getCorDF(attrtnS3, 19), 15))
+```
+
+Let us look at GGPairs for the top correlated variable from above to assess collinearity.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# JobLevel, TotalWorkingYears, YearsAtCompany, Age
+# lets look at scatterplots
+ggpairs(attrtnS3, columns=c("MonthlyIncome", "JobLevel", "TotalWorkingYears", "YearsAtCompany", "Age"))
+```
+
+The plot doesn't signify collinearity. Lets us look at the scatterplot of TotalWorkingYears vs. MonthlyIncome to assess if a data transformation or higher-order regression terms help.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# lets look at the MonthlyIncome vs. TotalWorkingYears closely to see
+# if there is a curved relation and if a data transformation helps
+ggplot(data=attrtnS3, aes(x=TotalWorkingYears, y=MonthlyIncome)) +
+  geom_point() +
+  ggtitle("Case Study 2 - Monthly Income vs. Total Working Years") +
+  geom_smooth(method="loess")
+```
+
+The scatterplot doesn't suggest the need for data transformation or higher order regression terms. Let us assess linear models based on the top factors.
+
+Linear Model 1 - MonthlyIncome~JobLevel + TotalWorkingYears
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# let's assess a linear model based on JobLevel and TotalWorkingYears;
+# let's use Leave One Out CV method
+income.lm1 <- train(MonthlyIncome~JobLevel + TotalWorkingYears, method = "lm", data = attrtnS3, trControl = trainControl(method = "LOOCV"))
+summary(income.lm1)
+```
+
+Linear Model 2 - MonthlyIncome~JobLevel + TotalWorkingYears + YearsAtCompany
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+income.lm2 <- train(MonthlyIncome~JobLevel + TotalWorkingYears + YearsAtCompany, method = "lm", data = attrtnS3, trControl = trainControl(method = "LOOCV"))
+summary(income.lm2)
+```
+
+Linear Model 3 - MonthlyIncome~JobLevel + TotalWorkingYears + Age
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+income.lm3 <- train(MonthlyIncome~JobLevel + TotalWorkingYears + Age, method = "lm", data = attrtnS3, trControl = trainControl(method = "LOOCV"))
+summary(income.lm3)
+```
+
+Linear Model 4 - MonthlyIncome~JobLevel * TotalWorkingYears
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+income.lm4 <- train(MonthlyIncome~JobLevel * TotalWorkingYears, method = "lm", data = attrtnS3, trControl = trainControl(method = "LOOCV"))
+summary(income.lm4)
+```
+
+From the above analysis, we do not see significant benefits of adding additional variables or interaction terms to Model 1. Preferring a parsimonious model, we will proceed with Model 1 (linear model based on JobLevel and TotalWorkingYears) to predict MonthlyIncome, predict income for the validation dataset, and export predictions in the required format.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# we will go with model 1
+# import validation data set for monthly income
+incomeValidn <- read.csv("C:\\Users\\home\\Documents\\Sreeni\\SMU\\DDS\\CaseStudy2\\CaseStudy2CompSet No Salary.csv", header=TRUE, strip.white=TRUE, na.strings=c("", " ", "NA"))
+incomePrediction <- predict(income.lm1, newdata = incomeValidn, interval = "prediction")
+# add predictions to the validation set
+incomeValidn$MonthlyIncome <- incomePrediction
+# export to csv
+write.csv(select(incomeValidn, c("ID", "MonthlyIncome")), "C:\\Users\\home\\Documents\\Sreeni\\SMU\\DDS\\CaseStudy2\\Case2PredictionsPrabhala Salary.csv", row.names = FALSE)
+```
+
+##EDA on Job Role
+
+Finally, we will conduct exploratory data analysis based on Job Role to gain any insights that can help with employee retention and job satisfaction.
+
+First, let us look at percent stacked bars to analyze various factor variables vs. Job Role.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+# Job Role
+#ggplot(data=attrtn, aes(x=JobRole)) +
+#  geom_bar(aes(fill=as.factor(EnvironmentSatisfaction)))
+
+getFactorPctPlot(attrtn, 12, 17)  # Environment Satisfaction; comment
+getFactorPctPlot(attrtn, 19, 17)  # Marital Status; comment
+getFactorPctPlot(attrtn, 4, 17)   # Business Travel; comment
+getFactorPctPlot(attrtn, 24, 17)  # Over Time; no comment
+getFactorPctPlot(attrtn, 27, 17)  # Relationship Satisfaction; no comment
+getFactorPctPlot(attrtn, 32, 17)  # Work Life Balance' no comment
+getFactorPctPlot(attrtn, 8, 17)   # Education; comment
+getFactorPctPlot(attrtn, 9, 17)   # Education Field; no comment
+getFactorPctPlot(attrtn, 13, 17)  # Gender; comment
+getFactorPctPlot(attrtn, 15, 17)  # Job Involvement; no comment
+```
+
+Based on these plots, we see that:
+
+- Employees at senior-level positions, like Managers and Directors, have reported lower levels of satisfaction; these employees may need model engagement to assess the reasons
+- There are opportunities to increase the gender diversity among some of the roles, like Human Resources, Laboratory Technician etc.
+- Sales Representatives are made up of higher number of single individuals, potentially due to their age range compared to other roles
+- Education levels of Sales Representatives are in general lower compared to the employees in rest of the roles
+
+We will now look at boxplots for continuous variables in the data set.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.fullwidth=TRUE}
+getBoxPlotbyFactor <- function(df, factVarInd, valueVarInd) {
+  pdf <- df[,c(factVarInd, valueVarInd)]
+  names(pdf) <- c("Factor", "Value")
+  p <- ggplot(data = pdf, aes(x=Factor, y=Value, color=Factor)) +
+    geom_boxplot() +
+    stat_summary(fun.y=mean, geom="point", shape=18, size=1, show.legend = FALSE) +
+    theme(legend.position = "none") +
+    xlab(names(df)[factVarInd]) + ylab(names(df)[valueVarInd]) +
+    labs(title = str_c(names(df)[factVarInd], " by ", names(df)[valueVarInd])) +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 9))
+  return(p)
+}
+getBoxPlotbyFactor(attrtn, 17, 2)  # Age; comment
+getBoxPlotbyFactor(attrtn, 17, 20) # Monthly Income; comment
+getBoxPlotbyFactor(attrtn, 17, 25) # Percent Salary Hike; no comment
+getBoxPlotbyFactor(attrtn, 17, 30) # TOtal Working Years; comment
+getBoxPlotbyFactor(attrtn, 17, 33) # Years At Company; comment
+getBoxPlotbyFactor(attrtn, 17, 35) # Years Since Last Promotion; no comment
+getBoxPlotbyFactor(attrtn, 17, 7)  # Distance From Home; no comment
+```
+
+Based on these plots, we infer that:
+
+- In general, the roles Sales Representatives, Human Resources, and Library Technicians to some extent, consist of individuals with lesser overall experience as well as tenure in the firm
+- Firm needs to focus on the education, training, and mentoring needs of these roles to ensure employee satisfaction and retention
+
+---
+
+#####Check out my presentation video at: [Turnover Analysis](https://youtu.be/HE9MLaIvREk/)
+
+---
