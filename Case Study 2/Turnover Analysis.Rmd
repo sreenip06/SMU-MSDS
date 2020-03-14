@@ -6,6 +6,9 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
+
+---
+
 ##Executive Summary
 
 ###Background:
@@ -19,6 +22,8 @@ knitr::opts_chunk$set(echo = TRUE)
 1. Identify the top three factors that contribute to employee turnover
 2. Build a robust model to predict attrition
 3. Obtain job role specific insights that will help with employee retention, satisfaction, and professional development
+
+---
 
 ```{r echo=FALSE, warning=FALSE, message=FALSE}
 library(naniar)    # for NA chart
@@ -57,6 +62,8 @@ gg_miss_var(attrtnS1)
 ```
 
 All the variables contain values for all the observations. We will now continue with data exploration for variables selection.
+
+---
 
 ##Data Exploration
 
@@ -210,6 +217,8 @@ From the above plot, we can infer that the following variables have high correla
 - YearsWithCurrManager, YearsInCurrentRole
 
 Next up, we will assess the models based on specific sets of the top variables.
+
+---
 
 ##Classification Model for Attrition
 
@@ -396,6 +405,8 @@ attrtnValidn$Attrition <- ifelse(attrtnValidn$Attrition == 1, "Yes", "No")
 write.csv(select(attrtnValidn, c("ID", "Attrition")), "C:\\Users\\home\\Documents\\Sreeni\\SMU\\DDS\\CaseStudy2\\Case2PredictionsPrabhala Attrition.csv", row.names = FALSE)
 ```
 
+---
+
 ##Regression Model for Income
 
 We will now work a regression model to calculate the Monthly Income. For this, first, let us look at the correlation coefficients for MonthlyIncome variable.
@@ -468,6 +479,8 @@ incomeValidn$MonthlyIncome <- incomePrediction
 # export to csv
 write.csv(select(incomeValidn, c("ID", "MonthlyIncome")), "C:\\Users\\home\\Documents\\Sreeni\\SMU\\DDS\\CaseStudy2\\Case2PredictionsPrabhala Salary.csv", row.names = FALSE)
 ```
+
+---
 
 ##EDA on Job Role
 
